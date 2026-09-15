@@ -2,7 +2,7 @@
 
 Un SOC complet monté en local pour comprendre comment fonctionne vraiment la
 détection d'attaques. Wazuh d'un côté, une appli volontairement vulnérable de
-l'autre, et tout ce qu'il y a entre les deux.
+l'autre côté, et tout ce qu'il y a entre les deux.
 
 > Lab isolé. DVWA et le script d'attaque ne doivent viser que cette stack, rien
 > d'autre.
@@ -35,7 +35,7 @@ envoie une alerte sur Slack. Le tout en moins d'une seconde.
                     v                     v                  v
              +-------------+      +--------------+   +-------------+
              |   Indexer   |      |  ban auto    |   |    Slack    |
-             | (le stockage|      |  (firewall)  |   |  (l'alerte) |
+             | (stockage)  |      |  (firewall)  |   |  (l'alerte) |
              +------+------+      +--------------+   +-------------+
                     v
              +-------------+
@@ -45,7 +45,7 @@ envoie une alerte sur Slack. Le tout en moins d'une seconde.
 
 Quatre conteneurs :
 - **wazuh.manager** : reçoit les logs, applique les règles, décide
-- **wazuh.indexer** : stocke les alertes (c'est un OpenSearch, ça bouffe de la RAM)
+- **wazuh.indexer** : stocke les alertes (c'est un OpenSearch, ça consomme de la RAM)
 - **wazuh.dashboard** : l'interface web
 - **dvwa** : l'appli vulnérable qui sert de cible
 
@@ -82,7 +82,7 @@ règles perso.
 La 100021 est la plus intéressante à mon avis. Une tentative de login ratée
 c'est banal, personne ne s'en soucie. Six en une minute depuis la même adresse,
 c'est plus la même histoire. C'est ça une règle de corrélation : on ne regarde
-pas l'événement, on regarde le motif.
+pas l'événement, on regarde le motif : il se peut que la personne a oublié son mot de passe par exemple.
 
 ```xml
 <rule id="100021" level="10" frequency="6" timeframe="60">
@@ -107,16 +107,16 @@ secondes.
 </active-response>
 ```
 
-J'ai mis un timeout et pas un ban définitif exprès. Si quelqu'un spoofe l'IP
+J'ai mis un timeout et pas un ban définitif exprès. Parce que, si quelqu'un spoofe l'IP
 d'un partenaire légitime, un ban permanent couperait ce partenaire. L'attaquant
 aurait réussi un DoS en se servant de ma propre défense. Mieux vaut 5 minutes.
 
 Dans mon lab le ban s'arrête sur `172.19.0.1` parce que c'est la gateway du
-réseau Docker et Wazuh refuse de bannir les IP d'infra. C'est logique — sinon le
+réseau Docker et Wazuh refuse de bannir les IP d'infra. C'est logique car sinon le
 conteneur se coupe du réseau tout seul. Mais toute la chaîne avant fonctionne,
 on voit bien la commande `add` et la vérif de l'IP dans les logs.
 
-## Les galères
+## Les difficultés rencontrées
 
 ### Les certificats (le pire)
 
@@ -166,8 +166,8 @@ espace à trouver. J'ai corrigé en prenant les trois formes possibles :
 ```
 
 Ce qui m'a marqué c'est que ça plante en silence. Aucune erreur nulle part. La
-règle existe, le log arrive, l'attaque passe, et le dashboard reste vide. Tu
-crois que t'es protégé alors que non. C'est le pire truc qui puisse arriver sur
+règle existe, le log arrive, l'attaque passe, et le dashboard reste vide. On
+croit qu'on est protégé alors que non. C'est le pire truc qui puisse arriver sur
 un SIEM.
 
 ### L'agent qu'on peut pas installer
