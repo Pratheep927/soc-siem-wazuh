@@ -1,0 +1,46 @@
+<!--
+  Regles de detection Entra ID / Microsoft 365 (SignInLogs)
+  Plage 110000 reservee aux regles personnalisees.
+  A placer dans /var/ossec/etc/rules/entra_rules.xml puis redemarrer le manager.
+  Test : cat entra-signin-samples.json | /var/ossec/bin/wazuh-logtest
+-->
+<group name="entra,azure,identity,">
+
+  <!-- Regle de base : tout evenement de connexion Entra ID -->
+  <rule id="110000" level="3">
+    <decoded_as>json</decoded_as>
+    <field name="azure.category">SignInLogs</field>
+    <description>Entra ID: evenement de connexion</description>
+  </rule>
+
+  <!-- Echec d'authentification : mauvais mot de passe (code 50126) -->
+  <rule id="110010" level="5">
+    <if_sid>110000</if_sid>
+    <field name="azure.properties.status.errorCode">50126</field>
+    <description>Entra ID: echec d'authentification - $(azure.properties.userPrincipalName)</description>
+    <mitre>
+      <id>T1110</id>
+    </mitre>
+  </rule>
+
+  <!-- Echec de MFA (code 50074) : mot de passe correct, second facteur echoue -->
+  <rule id="110011" level="8">
+    <if_sid>110000</if_sid>
+    <field name="azure.properties.status.errorCode">50074</field>
+    <description>Entra ID: echec MFA - possible compte compromis - $(azure.properties.userPrincipalName)</description>
+    <mitre>
+      <id>T1621</id>
+    </mitre>
+  </rule>
+
+  <!-- Correlation : 5 echecs d'auth en 120s depuis la meme IP = password spraying -->
+  <rule id="110020" level="12" frequency="5" timeframe="120">
+    <if_matched_sid>110010</if_matched_sid>
+    <same_field>azure.properties.ipAddress</same_field>
+    <description>Entra ID: PASSWORD SPRAY detecte depuis $(azure.properties.ipAddress)</description>
+    <mitre>
+      <id>T1110.003</id>
+    </mitre>
+  </rule>
+
+</group>
