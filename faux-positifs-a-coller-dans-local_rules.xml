@@ -1,0 +1,34 @@
+<!--
+  ============================================================
+  REGLES D'EXCLUSION DE FAUX POSITIFS
+  ============================================================
+  A COLLER DANS ton fichier local_rules.xml existant,
+  a l'interieur de la balise <group>, apres tes regles de detection.
+
+  Principe : niveau 0 = Wazuh n'alerte pas. On ne supprime pas la
+  detection, on l'affine pour qu'elle ne se declenche pas sur du
+  trafic legitime (healthcheck, supervision), tout en restant active
+  contre une vraie attaque depuis une IP externe.
+-->
+
+  <!-- Healthcheck Docker local sur login.php : bruit, pas une menace -->
+  <rule id="100090" level="0">
+    <if_sid>100020</if_sid>
+    <srcip>127.0.0.1</srcip>
+    <url>login.php</url>
+    <description>Faux positif: healthcheck local sur login.php - ignore</description>
+  </rule>
+
+  <!-- Endpoints de supervision (monitoring) : trafic attendu -->
+  <rule id="100091" level="0">
+    <if_sid>100020</if_sid>
+    <url>/server-status|/health|/ping</url>
+    <description>Faux positif: endpoint de supervision - ignore</description>
+  </rule>
+
+  <!-- Echec d'authentification isole : banal, seul le motif brute-force alerte -->
+  <rule id="100092" level="0">
+    <if_sid>100021</if_sid>
+    <srcip>127.0.0.1</srcip>
+    <description>Faux positif: echec d'auth local isole - ignore</description>
+  </rule>
