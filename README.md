@@ -2,7 +2,7 @@
 
 Un SOC complet monté en local pour comprendre comment fonctionne vraiment la
 détection d'attaques. Wazuh d'un côté, une appli volontairement vulnérable de
-l'autre côté, et tout ce qu'il y a entre les deux.
+l'autre, et tout ce qu'il y a entre les deux.
 
 > Lab isolé. DVWA et le script d'attaque ne doivent viser que cette stack, rien
 > d'autre.
@@ -35,7 +35,7 @@ envoie une alerte sur Slack. Le tout en moins d'une seconde.
                     v                     v                  v
              +-------------+      +--------------+   +-------------+
              |   Indexer   |      |  ban auto    |   |    Slack    |
-             | (stockage)  |      |  (firewall)  |   |  (l'alerte) |
+             | (le stockage|      |  (firewall)  |   |  (l'alerte) |
              +------+------+      +--------------+   +-------------+
                     v
              +-------------+
@@ -45,7 +45,7 @@ envoie une alerte sur Slack. Le tout en moins d'une seconde.
 
 Quatre conteneurs :
 - **wazuh.manager** : reçoit les logs, applique les règles, décide
-- **wazuh.indexer** : stocke les alertes (c'est un OpenSearch, ça consomme de la RAM)
+- **wazuh.indexer** : stocke les alertes (c'est un OpenSearch, ça bouffe de la RAM)
 - **wazuh.dashboard** : l'interface web
 - **dvwa** : l'appli vulnérable qui sert de cible
 
@@ -82,7 +82,7 @@ règles perso.
 La 100021 est la plus intéressante à mon avis. Une tentative de login ratée
 c'est banal, personne ne s'en soucie. Six en une minute depuis la même adresse,
 c'est plus la même histoire. C'est ça une règle de corrélation : on ne regarde
-pas l'événement, on regarde le motif : il se peut que la personne a oublié son mot de passe par exemple.
+pas l'événement, on regarde le motif.
 
 ```xml
 <rule id="100021" level="10" frequency="6" timeframe="60">
@@ -107,16 +107,152 @@ secondes.
 </active-response>
 ```
 
-J'ai mis un timeout et pas un ban définitif exprès. Parce que, si quelqu'un spoofe l'IP
+J'ai mis un timeout et pas un ban définitif exprès. Si quelqu'un spoofe l'IP
 d'un partenaire légitime, un ban permanent couperait ce partenaire. L'attaquant
 aurait réussi un DoS en se servant de ma propre défense. Mieux vaut 5 minutes.
 
 Dans mon lab le ban s'arrête sur `172.19.0.1` parce que c'est la gateway du
-réseau Docker et Wazuh refuse de bannir les IP d'infra. C'est logique car sinon le
+réseau Docker et Wazuh refuse de bannir les IP d'infra. C'est logique — sinon le
 conteneur se coupe du réseau tout seul. Mais toute la chaîne avant fonctionne,
 on voit bien la commande `add` et la vérif de l'IP dans les logs.
 
-## Les difficultés rencontrées
+## Les faux positifs
+
+Une fois les règles en place, je me suis rendu compte que le dashboard se
+remplissait d'alertes qui n'en étaient pas. Le healthcheck de Docker tape sur
+`login.php` toutes les 30 secondes depuis `127.0.0.1` : ma règle de tentative de
+login se déclenchait dessus. La supervision qui interroge `/server-status` pareil.
+Résultat, du bruit qui noie les vraies alertes.
+
+C'est exactement le problème d'un vrai SOC : un analyste qui reçoit 200 alertes
+par jour dont 195 fausses finit par toutes les ignorer, y compris la bonne. Donc
+j'ai écrit des règles d'exclusion, en niveau 0 (Wazuh n'alerte pas sur le niveau
+0), dans `local_rules.xml` :
+
+```xml
+<rule id="100090" level="0">
+  <if_sid>100020</if_sid>
+  <srcip>127.0.0.1</srcip>
+  <url>login.php</url>
+  <description>Healthcheck local sur login.php - ignore</description>
+</rule>
+```
+
+Le principe : je ne supprime pas la règle de détection, je lui dis juste « ce
+motif précis, dans ce contexte précis, ce n'est pas une menace ». Une tentative
+de login depuis `127.0.0.1` sur le healthcheck, oui. La même tentative depuis une
+IP externe, l'alerte se déclenche normalement. C'est ça le tuning d'un SIEM : pas
+couper la détection, mais la rendre assez fine pour ne parler que quand ça compte.
+
+| ID | Niveau | Ce qu'elle fait |
+|---|---|---|
+| 100090 | 0 | ignore le healthcheck local sur login.php |
+| 100091 | 0 | ignore la supervision (/server-status, /health, /ping) |
+| 100092 | 0 | ignore un échec d'auth isolé (le motif brute-force reste, lui) |
+
+## Aller plus loin : la détection sur le cloud (Entra ID / M365)
+
+Un ingénieur DevSecOps à qui j'ai montré le projet m'a fait une remarque : monter
+Wazuh sur une appli web c'est bien, mais aujourd'hui les attaques qui comptent
+visent l'identité — les comptes Microsoft 365, l'Azure AD (rebaptisé Entra ID).
+Le password spraying sur les tenants M365, c'est le pain quotidien des SOC en
+2026. J'ai donc étendu le projet à cette source.
+
+Le principe est le même que pour les logs Apache : Entra ID produit des
+`SignInLogs` au format JSON, Wazuh sait les décoder nativement, et j'écris mes
+règles par-dessus. Chaque échec de connexion porte un `errorCode` : `50126` c'est
+un mauvais mot de passe, `50074` un échec de MFA. Ce sont ces codes que je
+surveille.
+
+Je n'ai pas de vrai tenant Microsoft (ça coûte un abonnement, et surtout je ne
+voulais pas exposer de vraies identités). J'ai donc rejoué des logs au format
+exact documenté par Microsoft, injectés dans Wazuh. La détection, elle, est
+réelle — c'est le même moteur, les mêmes règles, qui tourneraient à l'identique
+sur un vrai tenant branché via le module `azure`.
+
+Mes règles (`entra_rules.xml`, plage 110000) :
+
+| ID | Niveau | Ce qu'elle détecte | MITRE |
+|---|---|---|---|
+| 110000 | 3 | un événement de connexion Entra ID | — |
+| 110010 | 5 | un échec d'authentification (errorCode 50126) | T1110 |
+| 110011 | 8 | un échec de MFA — possible compte déjà compromis | T1621 |
+| 110020 | 12 | **password spraying** : 5 échecs en 120s depuis la même IP | T1110.003 |
+
+La 110020 est le cœur du sujet, et c'est encore une règle de corrélation. Un
+échec de mot de passe isolé, tout le monde en fait. Cinq échecs en deux minutes
+depuis la même IP, sur des comptes différents, c'est la signature d'un attaquant
+qui teste un mot de passe courant sur tout l'annuaire. Je l'ai testée avec
+`wazuh-logtest` en injectant cinq événements : les quatre premiers sortent en
+niveau 5, et le cinquième bascule en niveau 12 avec le mapping T1110.003. Exactement
+le comportement attendu.
+
+```xml
+<rule id="110020" level="12" frequency="5" timeframe="120">
+  <if_matched_sid>110010</if_matched_sid>
+  <same_field>azure.properties.ipAddress</same_field>
+  <description>Entra ID: PASSWORD SPRAY detecte depuis $(azure.properties.ipAddress)</description>
+  <mitre><id>T1110.003</id></mitre>
+</rule>
+```
+
+Le distinguo que j'assume en entretien : je fais de la **détection** sur des logs
+d'identité, pas de l'administration d'un tenant M365. Je ne prétends pas gérer
+Entra ID en production ; je montre que je sais transformer ses journaux en
+alertes exploitables. C'est le métier d'un analyste SOC.
+
+## Analyse d'IoC : qualifier l'IP de l'attaquant
+
+Détecter une attaque c'est bien, mais un analyste doit aussi savoir dire *qui*
+frappe. J'ai donc pris l'IP source de mon scénario de password spraying
+(`45.155.205.99`) et je l'ai qualifiée en croisant plusieurs sources de
+renseignement ouvertes (AbuseIPDB, VirusTotal, Shodan).
+
+Ce que j'ai trouvé, et pourquoi c'est intéressant :
+
+| Élément | Résultat |
+|---|---|
+| Source | Ce qu'elle dit |
+|---|---|
+| AbuseIPDB | 990 reports, 37 sources indépendantes (2020-2022), score actuel 0 % |
+| VirusTotal | 0/89, aucun vendeur ne la classe malveillante aujourd'hui |
+| Shodan | aucun service exposé actuellement (no information available) |
+| Hébergeur | Cloud Technologies LLC (Cloud.ru), datacenter, AS208677 |
+| Pays | Russie (Moscou) |
+| Catégories signalées | Port Scan majoritaire, Hacking, tentatives de connexion |
+
+Le point qui m'a appris quelque chose : **mes deux sources n'étaient pas
+d'accord**. AbuseIPDB affichait 990 signalements mais un score actuel de 0 % ;
+VirusTotal la donnait totalement propre. En le lisant vite, on conclurait « IP
+inoffensive ». C'est plus subtil que ça, et comprendre pourquoi, c'est le cœur
+du métier.
+
+Les deux ont raison, parce qu'elles ne mesurent pas la même chose. VirusTotal
+agrège surtout des blocklists **en temps réel** : un 0/89 signifie « pas sur une
+liste noire active en ce moment ». AbuseIPDB est de la remontée communautaire
+**historique** : ses 990 reports sont un journal du passé, qui subsiste même une
+fois l'activité arrêtée. Le score AbuseIPDB décroît d'ailleurs dans le temps, et
+cette IP n'avait plus été signalée depuis quatre ans — d'où le retour à zéro.
+
+La lecture correcte n'est donc pas « une source se trompe », mais : cette IP a un
+**passé hostile documenté** (scan et hacking depuis un datacenter russe) et
+n'est **plus active ni blocklistée aujourd'hui**. Risque actuel faible, mais ce
+n'est pas une IP de confiance : son historique justifierait une surveillance
+renforcée si elle réapparaissait.
+
+Shodan complète le tableau : il n'a aucun service exposé enregistré sur cette IP,
+ce qui confirme qu'elle est dormante aujourd'hui. Les trois sources convergent
+donc, sous trois angles différents : une IP au passé hostile documenté, mais
+inactive et non exposée à l'heure actuelle.
+
+La leçon que je retiens : un indicateur ne se lit pas sur un seul chiffre ni sur
+une seule source. Il faut croiser, comprendre ce que chaque source mesure, et
+regarder le contexte (une IP en datacenter n'a pas le même sens qu'une IP
+résidentielle). Une fois recontextualisée, cette IP est cohérente avec le
+comportement que ma règle 110020 avait détecté : de la reconnaissance, pas un
+utilisateur légitime.
+
+## Les galères
 
 ### Les certificats (le pire)
 
@@ -166,8 +302,8 @@ espace à trouver. J'ai corrigé en prenant les trois formes possibles :
 ```
 
 Ce qui m'a marqué c'est que ça plante en silence. Aucune erreur nulle part. La
-règle existe, le log arrive, l'attaque passe, et le dashboard reste vide. On
-croit qu'on est protégé alors que non. C'est le pire truc qui puisse arriver sur
+règle existe, le log arrive, l'attaque passe, et le dashboard reste vide. Tu
+crois que t'es protégé alors que non. C'est le pire truc qui puisse arriver sur
 un SIEM.
 
 ### L'agent qu'on peut pas installer
@@ -214,11 +350,12 @@ Là c'est une clé de démo Debian donc sans valeur, mais le principe est le mê
 Faut être honnête, c'est un lab :
 
 - mono-nœud, aucune HA
-- une seule source de logs, en vrai y'en a des dizaines
 - pas de gestion de rétention des index
-- j'ai quasiment pas travaillé les faux positifs, alors que c'est le gros du
-  boulot dans un vrai SOC
+- les logs Entra ID sont rejoués, pas issus d'un vrai tenant (le moteur de
+  détection, lui, est réel et prêt à brancher via le module `azure`)
+- le tuning des faux positifs est amorcé (3 règles d'exclusion) mais sur un vrai
+  parc il y aurait des dizaines de cas à traiter
 
 ## Stack
 
-Wazuh 4.14.7, OpenSearch, Docker Compose, DVWA.
+Wazuh 4.14.7, OpenSearch, Docker Compose, DVWA, décodeur JSON Azure/Entra ID.
